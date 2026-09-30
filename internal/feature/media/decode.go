@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 
 	"github.com/mewkiz/flac"
 
@@ -16,19 +17,31 @@ import (
 // converts ordinary media to WAVE with ffmpeg before serving it, so most of what lands here is
 // WAVE at the pipeline's rate; but the announce TTS stream is handed over in whatever container the
 // engine produces, so this reads the ones the device can actually play rather than trust that
-// conversion. Everything comes out 16 kHz mono, which is what PlayVoice takes.
-func decode(body []byte) ([]int16, error) {
+// conversion. The containers with magic bytes announce themselves; raw PCM has none, so it is keyed
+// off the .pcm extension on the URL the engine chose. Everything comes out 16 kHz mono, which is
+// what PlayVoice takes.
+func decode(url string, body []byte) ([]int16, error) {
 	switch {
 	case len(body) >= 12 && string(body[0:4]) == "RIFF" && string(body[8:12]) == "WAVE":
 		return wavPCM(body)
 	case len(body) >= 4 && string(body[0:4]) == "fLaC":
 		return flacPCM(body)
+	case looksLikePCM(url):
+		return pcmPCM(body)
 	default:
 		return nil, fmt.Errorf(
 			"announcement is %s, which the device does not play (it decodes WAVE and FLAC); %d bytes",
 			container(body), len(body),
 		)
 	}
+}
+
+// looksLikePCM reports whether the URL names a bare PCM stream, which is what a TTS engine with an
+// explicit response_format=pcm hands over. Raw PCM carries no header to sniff, so the extension is
+// the only signal it is not something the body bytes could be mistaken for.
+func looksLikePCM(url string) bool {
+	path := strings.SplitN(url, "?", 2)[0]
+	return strings.HasSuffix(path, ".pcm")
 }
 
 // container names whatever the body starts with, so the error says something about the file rather
@@ -138,6 +151,21 @@ func flacPCM(body []byte) ([]int16, error) {
 		}
 	}
 	return speaker.ToVoiceRate(out, rate), nil
+}
+
+// pcmPCM reads a bare PCM stream as the wyoming TTS pipeline serves it: 16 kHz mono, 16-bit
+// little-endian, no container. That is precisely what an engine configured with
+// response_format=pcm returns; the URL's .pcm extension is what dispatches here, since the bytes
+// carry nothing that says what they are.
+func pcmPCM(body []byte) ([]int16, error) {
+	if len(body)%2 != 0 {
+		return nil, fmt.Errorf("raw PCM of %d bytes, not a whole number of 16-bit samples", len(body))
+	}
+	samples := make([]int16, len(body)/2)
+	for i := range samples {
+		samples[i] = int16(binary.LittleEndian.Uint16(body[i*2:]))
+	}
+	return samples, nil
 }
 
 // toVoice downmixes interleaved PCM to mono and brings it to the pipeline's rate.

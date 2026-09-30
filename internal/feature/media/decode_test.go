@@ -27,7 +27,7 @@ func wavData(channels uint16, rate uint32, samples []int16) []byte {
 
 func TestDecodePassesPipelineRateThrough(t *testing.T) {
 	samples := []int16{1, -2, 3, -4, 5, -6, 7, -8, 100, -200}
-	out, err := decode(wavData(1, 16000, samples))
+	out, err := decode("", wavData(1, 16000, samples))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestDecodeBringsRawWAVToThePipelineRate(t *testing.T) {
 	for i := range in {
 		in[i] = 1000
 	}
-	out, err := decode(wavData(1, 44100, in))
+	out, err := decode("", wavData(1, 44100, in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestDecodeDownmixesStereo(t *testing.T) {
 			in[i] = -4000
 		}
 	}
-	out, err := decode(wavData(2, 16000, in))
+	out, err := decode("", wavData(2, 16000, in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestDecodeFLAC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := decode(body)
+	out, err := decode("", body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,9 +118,47 @@ func TestDecodeFLAC(t *testing.T) {
 	}
 }
 
+func TestDecodeRawPCM(t *testing.T) {
+	samples := []int16{1, -2, 3, -4, 100, -200, 32767, -32768}
+	out, err := decode("http://ha/api/tts_proxy/abc123.pcm", le16(samples))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != len(samples) {
+		t.Fatalf("came back %d samples, want %d", len(out), len(samples))
+	}
+	for i := range samples {
+		if out[i] != samples[i] {
+			t.Errorf("sample %d changed: %d -> %d", i, samples[i], out[i])
+		}
+	}
+}
+
+func TestDecodeRefusesOddSizedPCM(t *testing.T) {
+	_, err := decode("http://ha/api/tts_proxy/abc123.pcm", []byte{1, 2, 3})
+	if err == nil || !strings.Contains(err.Error(), "16-bit") {
+		t.Fatalf("want an odd-byte-count error, got %v", err)
+	}
+}
+
+func TestDecodePCMLooksForTheExtension(t *testing.T) {
+	samples := le16([]int16{1, 2, 3})
+	// Without the .pcm hint the same bytes are an unknown container, not audio.
+	if _, err := decode("", samples); err == nil || !strings.Contains(err.Error(), "does not play") {
+		t.Fatalf("undispatched PCM should be refused, got %v", err)
+	}
+}
+
+func TestDecodeRepresentsContainersBySuffix(t *testing.T) {
+	out, err := decode("http://ha/api/tts_proxy/abc123.WAV", wavData(1, 16000, []int16{5, -7}))
+	if err != nil || len(out) != 2 {
+		t.Fatalf("the WAVE magic must win over a .WAV path, got %v", err)
+	}
+}
+
 func TestDecodeRefusesOtherContainers(t *testing.T) {
 	body := []byte("ID3\x04" + strings.Repeat("x", 200))
-	_, err := decode(body)
+	_, err := decode("", body)
 	if err == nil {
 		t.Fatal("decoded an ID3 blob")
 	}
@@ -133,11 +171,11 @@ func TestDecodeRefusesOtherContainers(t *testing.T) {
 }
 
 func TestDecodeRefusesATruncatedWAVE(t *testing.T) {
-	if _, err := decode([]byte("RIFF")); err == nil {
+	if _, err := decode("", []byte("RIFF")); err == nil {
 		t.Fatal("accepted four bytes")
 	}
 	// RIFF header but no data chunk: the parser must say so rather than panic.
-	_, err := decode([]byte("RIFF\xff\xff\xff\xffWAVE" + string(fmtChunk(1, 16000, 16))))
+	_, err := decode("", []byte("RIFF\xff\xff\xff\xffWAVE"+string(fmtChunk(1, 16000, 16))))
 	if err == nil || !strings.Contains(err.Error(), "no data chunk") {
 		t.Fatalf("want a missing-data error, got %v", err)
 	}
@@ -147,7 +185,7 @@ func TestDecodeRefusesACompressedWAVE(t *testing.T) {
 	// fmtChunk in media_test.go hard-codes format 1 (PCM); an IEEE float WAVE is the one a decoder
 	// must not read as raw samples.
 	body := wave(fmtWaveFormat(3, 1, 16000, 16), le16([]int16{1, 2, 3}))
-	_, err := decode(body)
+	_, err := decode("", body)
 	if err == nil || !strings.Contains(err.Error(), "unsupported WAVE format 3") {
 		t.Fatalf("want an unsupported-format error, got %v", err)
 	}
@@ -159,13 +197,13 @@ func TestDecodeSurfacesATruncatedFLAC(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Cut in the middle of the first frame: the stream info parses, the frame does not.
-	if _, err := decode(body[:200]); err == nil || !strings.Contains(err.Error(), "FLAC stream") {
+	if _, err := decode("", body[:200]); err == nil || !strings.Contains(err.Error(), "FLAC stream") {
 		t.Fatalf("want a FLAC decode error, got %v", err)
 	}
 }
 
 func TestDecodeRefusesBrokenFLAC(t *testing.T) {
-	_, err := decode(append([]byte("fLaC"), []byte("not a flac")...))
+	_, err := decode("", append([]byte("fLaC"), []byte("not a flac")...))
 	if err == nil || !strings.Contains(err.Error(), "FLAC stream") {
 		t.Fatalf("want a FLAC read error, got %v", err)
 	}

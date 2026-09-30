@@ -55,5 +55,5 @@ func Fetch(ctx context.Context, url string) ([]int16, error) {
 	if err != nil {
 		return nil, err
 	}
-	return decode(body)
+	return decode(url, body)
 }
